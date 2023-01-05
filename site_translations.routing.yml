@@ -1,0 +1,6 @@
+site_translations.translate_exclude:
+  path: '/node/{node}/translations/exclude'
+  defaults:
+    _controller: '\Drupal\site_translations\Controller\TranslationController::exclude'
+  requirements:
+    _permission: 'edit content'

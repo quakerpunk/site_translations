@@ -1,0 +1,10 @@
+langcode: en
+status: true
+dependencies:
+  module:
+    - node
+id: exclude_from_translation
+label: 'Exclude from translation'
+type: node
+plugin: exclude_from_translation
+configuration: {  }

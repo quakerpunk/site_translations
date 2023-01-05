@@ -1,0 +1,7 @@
+name: Site Translations
+description: Module to support translation views. Includes automatic marking of outdated translations and email alerts.
+package: Translations
+
+type: module
+core: 8.x
+core_version_requirement: ^8 || ^9

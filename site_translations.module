@@ -1,0 +1,190 @@
+<?php
+
+/**
+ * @file
+ * Module to support translation views.
+ */
+
+use Drupal\Core\Url;
+use Drupal\node\Entity\Node;
+use Drupal\node\NodeInterface;
+use Drupal\views\ViewExecutable;
+use Drupal\Core\Entity\EntityInterface;
+// use Drupal\site_translations\ATLinkFieldProcessor;
+// use Drupal\site_translations\ATPathFieldProcessor;
+use Drupal\tmgmt_memory\SegmentTranslationInterface;
+
+/**
+ * Implements hook_entity_presave().
+ *
+ * If the source (ie. default) translation is English and updated, mark the
+ * translations as outdated.
+ */
+function site_translations_entity_presave(EntityInterface $entity) {
+  if ($entity instanceof Node && $entity->isDefaultTranslation()) {
+    // If we're working on the default translations, we can assume the
+    // translations will be affected once the node is saved.
+    /** @var \Drupal\content_translation\ContentTranslationManagerInterface $manager */
+    $manager = \Drupal::service('content_translation.manager');
+    $languages = \Drupal::languageManager()->getLanguages();
+
+    // Portuguese and Spanish throw errors, so we'll unset them.
+    unset($languages['pt-br']);
+    unset($languages['es']);
+
+    foreach ($languages as $langcode => $language) {
+      try {
+        $translation = $entity->getTranslation($langcode);
+        $metadata = $manager->getTranslationMetadata($translation);
+        $metadata->setOutdated(TRUE);
+      }
+      catch (\InvalidArgumentException $iae) {
+        $err_msg = "Could not get translation for " . $language->getName();
+        $err_msg .= ". This is likely a new node.";
+        \Drupal::logger('site_translations')->error($err_msg);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_operation_alter().
+ */
+function site_translations_entity_operation_alter(array &$operations, EntityInterface $entity) {
+  if ($entity instanceof NodeInterface && $entity->hasField('exclude_from_translations')) {
+    $nid = $entity->id();
+    $operations['exclude_translation'] = [
+      'title' => t('Exclude from translation'),
+      'url' => Url::fromRoute('site_translations.translate_exclude', ['node' => $nid]),
+      'weight' => 15,
+    ];
+  }
+
+  // We need our Translate link to open in a new tab.
+  $link_options = [
+    'attributes' => [
+      'target' => '_blank',
+    ],
+  ];
+
+  if (isset($operations['translate'])) {
+    $operations['translate']['url'] = $operations['translate']['url']->setOptions($link_options);
+  }
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function site_translations_form_alter(&$form, $form_state, $form_id) {
+  // \Drupal::logger('site_translations')->notice($form_id);
+  if ($form_id == 'views_exposed_form' && $form['#id'] == 'views-exposed-form-content-page-2') {
+    $form['translation_status']['#options'][1] = t('Yes');
+    $form['translation_status']['#options'][0] = t('No');
+
+    $form['translation_outdated']['#options'][1] = t('Yes');
+    $form['translation_outdated']['#options'][0] = t('No');
+  }
+
+  if ($form_id == 'tmgmt_job_item_edit_form') {
+    $default_msg = t('This translation provided by TMGMT Memory');
+    /** @var Drupal\tmgmt\Entity\JobItem $job_item */
+    $job_item = $form_state->getFormObject()->getEntity();
+
+    if ($job_item->needsReview()) {
+      $validator_messages = [];
+      /** @var \Drupal\tmgmt\Data $data_service */
+      $data_service = \Drupal::service('tmgmt.data');
+      $tji_data = $job_item->getData();
+      $tji_fields = $data_service->filterTranslatable($tji_data);
+      foreach ($tji_fields as $field_key => $field) {
+        $tji_key = explode('][', $field_key);
+        $tji_keyed_field_data = $job_item->getData($data_service->ensureArrayKey($tji_key));
+
+        if ($tji_keyed_field_data) {
+          if (isset($tji_keyed_field_data['#tmgmt_memory_translate']) && $tji_keyed_field_data['#tmgmt_memory_translate'] == TRUE) {
+            $validator_messages[$field_key] = $default_msg;
+          }
+        }
+      }
+    }
+
+    if (isset($validator_messages)) {
+      foreach ($validator_messages as $key => $value) {
+        $field_name = str_replace('][', '|', $key);
+        $field_category = explode('|', $field_name)[0];
+        $group_name = substr($field_name, 0, strrpos($field_name, '|'));
+
+        $form['review'][$field_category][$group_name][$field_name]['below']['validator_message'] = [
+          '#type' => 'container',
+          '#attributes' => [
+            'class' => [
+              'messages',
+              'messages--status',
+            ],
+          ],
+          'message' => [
+            '#markup' => $value,
+          ],
+        ];
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_views_pre_view().
+ */
+function site_translations_views_pre_view(ViewExecutable $view, $display_id, array &$args) {
+  \Drupal::service('page_cache_kill_switch')->trigger();
+  $exposed_input = $view->getExposedInput();
+  $view_id = $view->id();
+  if ($view_id == 'content' && $display_id == 'page_2' && empty($exposed_input)) {
+    $new_input = [
+      'type' => 'panopoly_page',
+      'translation_target_language' => 'fr',
+    ];
+    $view->setExposedInput($new_input);
+  }
+}
+
+/**
+ * Implements hook_entity_delete().
+ */
+function site_translations_entity_delete($entity) {
+  if ($entity instanceof SegmentTranslationInterface) {
+    $all_entities = [];
+    /** @var \Drupal\tmgmt_memory\UsageStorageInterface $storage */
+    $storage = \Drupal::entityTypeManager()->getStorage('tmgmt_memory_usage');
+    $all_entities['sources'] = $storage->loadMultipleBySegment($entity->getSourceId());
+    $all_entities['targets'] = $storage->loadMultipleBySegment($entity->getTargetId());
+    if (!empty($all_entities['sources']) && !empty($all_entities['targets'])) {
+      /** @var \Drupal\tmgmt_memory\UsageTranslationStorageInterface $storage */
+      $storage = \Drupal::entityTypeManager()->getStorage('tmgmt_memory_usage_translation');
+      $all_entities['usages'] = $storage->loadMultipleBySourcesAndTargets($all_entities['sources'], $all_entities['targets']);
+      $all_entities = _array_flatten($all_entities);
+      /** @var \Drupal\Core\Entity\ContentEntityBase $entity_to_delete */
+      foreach ($all_entities as $entity_to_delete) {
+        $entity_to_delete->delete();
+      }
+    }
+  }
+}
+
+/**
+ * Helper function to flatten the entities array for deletion.
+ *
+ * @param array $array
+ *   The array of entities.
+ */
+function _array_flatten(array $array) {
+  $flat_arr = [];
+  foreach ($array as $key => $value) {
+    if (is_array($value)) {
+      $flat_arr = array_merge($flat_arr, _array_flatten($value));
+    }
+    else {
+      $flat_arr[$key] = $value;
+    }
+  }
+  return $flat_arr;
+}
